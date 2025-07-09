@@ -164,10 +164,10 @@ class GeoidHeight(object):
     def _rawval(self, ix, iy):
         if iy < 0:
             iy = -iy
-            ix += self.width // 2      # 保证仍为 int
+            ix += self.width // 2  # 保证仍为 int
         elif iy >= self.height:
             iy = 2 * (self.height - 1) - iy
-            ix += self.width // 2      # idem
+            ix += self.width // 2  # idem
         if ix < 0:
             ix += self.width
         elif ix >= self.width:
@@ -176,7 +176,6 @@ class GeoidHeight(object):
         return struct.unpack_from(
             ">H", self.raw, (iy * self.width + ix) * 2 + self.headerlen
         )[0]
-
 
     def get(self, lat, lon, cubic=True):
         if lon < 0:

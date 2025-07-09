@@ -1,6 +1,35 @@
-"""
-Fast ZTD generator based on NWM / ERA-like 3-D meteorological files.
-保留高精度 CubicSpline 与双精度计算，同时对水平与垂直插值做并行 / 向量化加速。
+"""Fast ZTD generator based on NWM / ERA-like 3-D meteorological files.
+
+This module implements a high performance workflow for deriving Zenith
+Tropospheric Delay (ZTD) from numerical weather prediction data.  The
+computation follows the eleven steps originally implemented in
+``ztd_nwm.py``:
+
+1. Read and pre-process the meteorological file.
+2. Perform horizontal interpolation to station coordinates.
+3. Quantify meteorological parameters with proper units.
+4. Convert geopotential height to orthometric height.  The formulae are
+   taken from the ERA5 documentation_.
+5. Transform orthometric height to ellipsoidal height using the selected
+   geoid model.
+6. Compute water vapour pressure ``e``.
+7. Optionally resample to an ellipsoidal vertical grid.
+8. Derive refractive indices.  Recommended constants come from
+   "Troposphere modeling and filtering for precise GPS leveling" [2004].
+9. Compute top level hydrostatic and wet delays.
+10. Integrate refractivity using Simpson's rule.
+11. Interpolate ZTD to the exact station altitude.
+
+References
+----------
+`ERA5 data documentation`_
+"GNSS定位定时中的对流层延迟模型优化研究", 苏行
+"Establishing a high‑precision real‑time ZTD model of China with GPS and
+ERA5 historical datas and its application in PPP"
+"Real-time precise point positioning augmented with high-resolution
+numerical weather prediction model"
+
+.. _ERA5 data documentation: https://confluence.ecmwf.int/display/CKB/ERA5%3A+data+documentation#heading-SpatialreferencesystemsandEarthmodel
 """
 
 from __future__ import annotations
@@ -41,7 +70,7 @@ class ZTDNWMGenerator:
         n_jobs: int = -1,
         batch_size: int = 100_000,
         load_in_memory: bool = True,
-            stream_copy=True,
+        stream_copy=True,
     ):
         self.nwm_path = Path(nwm_path)
         self.location = location.copy() if location is not None else None
@@ -66,6 +95,7 @@ class ZTDNWMGenerator:
         t0 = time.perf_counter()
         if self.stream_copy:
             import fsspec
+
             mem_url = "memory://temp.nc"
             with (
                 self.nwm_path.open("rb") as fsrc,
@@ -77,11 +107,13 @@ class ZTDNWMGenerator:
                 self.ds.load()
         else:
             if self.load_in_memory:
+
                 def _is_hdf5(path: Path, blocksize: int = 8) -> bool:
                     """快速判断文件是否以 HDF5 标识开头。"""
                     with path.open("rb") as f:
                         header = f.read(blocksize)
                     return header == b"\x89HDF\r\n\x1a\n"
+
                 # 1️⃣ 本地文件：直接用最快 backend；远程路径可另行处理
                 engine = "h5netcdf" if _is_hdf5(self.nwm_path) else None
                 try:
@@ -94,16 +126,20 @@ class ZTDNWMGenerator:
                     ).load()  # 真正读到内存
                 except Exception as e:
                     # fallback 双保
-                    logger.warning(f"{engine or 'default'} backend failed ({e}); retry with default engine")
+                    logger.warning(
+                        f"{engine or 'default'} backend failed ({e}); retry with default engine"
+                    )
                     self.ds = xr.open_dataset(self.nwm_path).load()
             else:
                 # 懒加载：留给后续 dask 计算
                 self.ds = xr.open_dataset(self.nwm_path)
 
         # === 后续维度重命名与补维保持不变 ===
-        rename_map = {"level": "pressure_level",
-                      "isobaricInhPa": "pressure_level",
-                      "valid_time": "time"}
+        rename_map = {
+            "level": "pressure_level",
+            "isobaricInhPa": "pressure_level",
+            "valid_time": "time",
+        }
         exist = {k: v for k, v in rename_map.items() if k in self.ds}
         if exist:
             logger.info(f"Renaming dimensions: {exist}")
@@ -114,7 +150,9 @@ class ZTDNWMGenerator:
         if "number" not in self.ds.dims:
             self.ds = self.ds.expand_dims("number")
 
-        logger.info(f"1/11: Reading meteorological file done in {time.perf_counter() - t0:.2f}s")
+        logger.info(
+            f"1/11: Reading meteorological file done in {time.perf_counter() - t0:.2f}s"
+        )
 
     # ---------------------- 2 水平插值 --------------------------- #
     def horizental_interpolate(self) -> None:
@@ -133,11 +171,13 @@ class ZTDNWMGenerator:
                 dims = da.dims
                 if {"latitude", "longitude"} <= set(dims):
                     lat_ax, lon_ax = dims.index("latitude"), dims.index("longitude")
-                    other_axes = [i for i in range(da.ndim) if i not in (lat_ax, lon_ax)]
+                    other_axes = [
+                        i for i in range(da.ndim) if i not in (lat_ax, lon_ax)
+                    ]
                     arr2 = np.moveaxis(
                         da.values,
                         (lat_ax, lon_ax) + tuple(other_axes),
-                        (0,      1)       + tuple(2 + np.arange(len(other_axes))),
+                        (0, 1) + tuple(2 + np.arange(len(other_axes))),
                     )
                     interp = RegularGridInterpolator(
                         (lat_grid, lon_grid),
@@ -151,10 +191,14 @@ class ZTDNWMGenerator:
                         res2 = np.moveaxis(res, range(1, res.ndim), range(res.ndim - 1))
                     else:
                         res2 = res[:, None]
-                    new_dims = tuple(d for d in dims if d not in ("latitude", "longitude")) + ("site_index",)
+                    new_dims = tuple(
+                        d for d in dims if d not in ("latitude", "longitude")
+                    ) + ("site_index",)
                     coords = {d: ds.coords[d] for d in new_dims if d != "site_index"}
                     coords["site_index"] = loc.index
-                    new_vars[vn] = xr.DataArray(res2, dims=new_dims, coords=coords, name=vn)
+                    new_vars[vn] = xr.DataArray(
+                        res2, dims=new_dims, coords=coords, name=vn
+                    )
                 else:
                     new_vars[vn] = da
 
@@ -165,7 +209,9 @@ class ZTDNWMGenerator:
             ds2["site"] = ("site_index", loc["site"].values)
             ds2.coords["alt"] = ds2.alt
             self.ds = ds2
-        logger.info(f"2/11: Horizontal interpolation done in {time.perf_counter()-t0:.2f}s")
+        logger.info(
+            f"2/11: Horizontal interpolation done in {time.perf_counter() - t0:.2f}s"
+        )
 
     # --------------------------- 3 量纲 --------------------------- #
     def quantify_met_parameters(self) -> None:
@@ -173,7 +219,9 @@ class ZTDNWMGenerator:
         self.ds["p"] = self.ds.pressure_level * units.hPa
         self.ds["z"] = self.ds["z"] * units.meters**2 / units.second**2
         self.ds["t"] = self.ds["t"] * units.kelvin
-        logger.info(f"3/11: Quantifying meteorological parameters done in {time.perf_counter()-t0:.2f}s")
+        logger.info(
+            f"3/11: Quantifying meteorological parameters done in {time.perf_counter() - t0:.2f}s"
+        )
 
     # --------------- 4 Geopotential → Orthometric ---------------- #
     def geopotential_to_orthometric(self) -> None:
@@ -189,21 +237,35 @@ class ZTDNWMGenerator:
             lat_vals = self.ds.lat
             if lat_vals.ndim == 1:
                 lat_vals = np.expand_dims(lat_vals, axis=(0, 1))
-            self.ds["h"] = geopotential_to_geometric(latitude=lat_vals, geopotential_height=geop_height)
+            self.ds["h"] = geopotential_to_geometric(
+                latitude=lat_vals, geopotential_height=geop_height
+            )
         else:
             raise ValueError("gravity_variation must be ignore or latitude")
-        logger.info(f"4/11: Geopotential→Orthometric done in {time.perf_counter()-t0:.2f}s")
+        logger.info(
+            f"4/11: Geopotential→Orthometric done in {time.perf_counter() - t0:.2f}s"
+        )
 
     # ------------- 5 Orthometric → Ellipsoidal ------------------- #
     def orthometric_to_ellipsoidal(self) -> None:
         t0 = time.perf_counter()
         geoid = GeoidHeight(egm_type=self.egm_type)
-        anomaly = np.array(
-            [geoid.get(float(la), float(lo)) for la, lo in zip(self.ds.lat.values, self.ds.lon.values)]
-        ) * units.meter
-        anom_da = xr.DataArray(anomaly, dims=("site_index",), coords={"site_index": self.ds.site_index})
+        anomaly = (
+            np.array(
+                [
+                    geoid.get(float(la), float(lo))
+                    for la, lo in zip(self.ds.lat.values, self.ds.lon.values)
+                ]
+            )
+            * units.meter
+        )
+        anom_da = xr.DataArray(
+            anomaly, dims=("site_index",), coords={"site_index": self.ds.site_index}
+        )
         self.ds["h"] = self.ds["h"] + anom_da
-        logger.info(f"5/11: Orthometric→Ellipsoidal done in {time.perf_counter()-t0:.2f}s")
+        logger.info(
+            f"5/11: Orthometric→Ellipsoidal done in {time.perf_counter() - t0:.2f}s"
+        )
 
     # ------------------------- 6 计算 e --------------------------- #
     def compute_e(self) -> None:
@@ -212,7 +274,9 @@ class ZTDNWMGenerator:
             self.ds["e"] = (self.ds.q * self.ds.p) / 0.622
         else:
             self.ds["e"] = (self.ds.q * self.ds.p) / (0.622 + 0.378 * self.ds.q)
-        logger.info(f"6/11: Computing water-vapor pressure done in {time.perf_counter()-t0:.2f}s")
+        logger.info(
+            f"6/11: Computing water-vapor pressure done in {time.perf_counter() - t0:.2f}s"
+        )
 
     # ------------------- 7 ellipsoidal 重采样 -------------------- #
     def resample_to_ellipsoidal(self) -> None:
@@ -227,7 +291,8 @@ class ZTDNWMGenerator:
 
         def _interp(site_idx, time0, p_name, interpolator):
             s_zen = ds.sel(site_index=site_idx, time=time0)
-            x = np.flip(s_zen.h.values); y = np.flip(s_zen[p_name].values)
+            x = np.flip(s_zen.h.values)
+            y = np.flip(s_zen[p_name].values)
             return site_idx, time0, p_name, interpolator(x, y).interpolate(target_h)
 
         results = ParallelPbar("Resample to Ellipsoidal")(n_jobs=self.n_jobs)(
@@ -245,18 +310,27 @@ class ZTDNWMGenerator:
         for s_idx, t_idx, p_name, arr in results:
             res_dict.setdefault(p_name, []).append((s_idx, t_idx, arr))
 
-        ds_new = xr.Dataset(coords={"site_index": ds.site_index, "time": ds.time, "h": target_h})
+        ds_new = xr.Dataset(
+            coords={"site_index": ds.site_index, "time": ds.time, "h": target_h}
+        )
         for p_name in ["e", "p", "t"]:
             buf = np.full((len(ds.site_index), len(ds.time), len(target_h)), np.nan)
             s_map = {s: i for i, s in enumerate(ds.site_index.values)}
             t_map = {t: i for i, t in enumerate(ds.time.values)}
             for s_idx, t_idx, interp_vals in res_dict[p_name]:
                 buf[s_map[s_idx], t_map[t_idx], :] = interp_vals
-            da = xr.DataArray(buf, dims=("site_index", "time", "h"), coords=ds_new.coords) * ds[p_name].metpy.units
+            da = (
+                xr.DataArray(
+                    buf, dims=("site_index", "time", "h"), coords=ds_new.coords
+                )
+                * ds[p_name].metpy.units
+            )
             ds_new[p_name] = da
         ds_new["lon"], ds_new["lat"], ds_new["site"] = ds.lon, ds.lat, ds.site
         self.ds = ds_new.sortby("h", ascending=False)
-        logger.info(f"7/11: Resampling to ellipsoidal done in {time.perf_counter()-t0:.2f}s")
+        logger.info(
+            f"7/11: Resampling to ellipsoidal done in {time.perf_counter() - t0:.2f}s"
+        )
 
     # ------------- 8 折射率计算 ---------------- #
     def compute_refractive_index(self) -> None:
@@ -270,48 +344,72 @@ class ZTDNWMGenerator:
         r_v = 461.525 * units.joule / (units.kilogram * units.kelvin)
         k2_ = k2 - k1 * r_d / r_v
 
-        z_d_inv = 1 + p_d * (57.90e-8 / units.hPa - 9.4581e-4 * units.kelvin / units.hPa * t ** -1
-                             + 0.25844 * units.kelvin**2 / units.hPa * t ** -2)
+        z_d_inv = 1 + p_d * (
+            57.90e-8 / units.hPa
+            - 9.4581e-4 * units.kelvin / units.hPa * t**-1
+            + 0.25844 * units.kelvin**2 / units.hPa * t**-2
+        )
         z_v_inv = 1 + e * (1 + 3.7e-4 / units.hPa * e) * (
-            -2.37321e-3 / units.hPa + 2.23366 * units.kelvin / units.hPa * t ** -1
-            - 710.792 * units.kelvin**2 / units.hPa * t ** -2
-            + 7.75141e4 * units.kelvin**3 / units.hPa * t ** -3
+            -2.37321e-3 / units.hPa
+            + 2.23366 * units.kelvin / units.hPa * t**-1
+            - 710.792 * units.kelvin**2 / units.hPa * t**-2
+            + 7.75141e4 * units.kelvin**3 / units.hPa * t**-3
         )
 
         n_d = z_d_inv * k1 * p_d / t
-        n_v = z_v_inv * (k2 * e / t + k3 * e / t ** 2)
-        rho_d = p_d / (r_d * t); rho_v = e / (r_v * t); rho_m = rho_d + rho_v
+        n_v = z_v_inv * (k2 * e / t + k3 * e / t**2)
+        rho_d = p_d / (r_d * t)
+        rho_v = e / (r_v * t)
+        rho_m = rho_d + rho_v
         n_h = k1 * r_d * rho_m
-        n_w = (k2_ * e / t + k3 * e / t ** 2) * z_v_inv
+        n_w = (k2_ * e / t + k3 * e / t**2) * z_v_inv
 
         if self.refractive_index == "mode2":
-            self.ds["n"] = n_w + n_h; self.ds["n_w"] = n_w; self.ds["n_h"] = n_h
+            self.ds["n"] = n_w + n_h
+            self.ds["n_w"] = n_w
+            self.ds["n_h"] = n_h
         else:
-            self.ds["n"] = n_d + n_v; self.ds["n_w"] = n_w; self.ds["n_h"] = n_d + n_v - n_w
+            self.ds["n"] = n_d + n_v
+            self.ds["n_w"] = n_w
+            self.ds["n_h"] = n_d + n_v - n_w
         self.ds["n_d"], self.ds["n_v"] = n_d, n_v
         self.ds["z_d_inv"], self.ds["z_v_inv"] = z_d_inv, z_v_inv
-        logger.info(f"8/11: Computing refractive index done in {time.perf_counter()-t0:.2f}s")
+        logger.info(
+            f"8/11: Computing refractive index done in {time.perf_counter() - t0:.2f}s"
+        )
 
     # ---------------- 9 顶层延迟 ---------------- #
     def compute_top_level_delay(self) -> None:
         t0 = time.perf_counter()
         ds = self.ds
-        top = ds.sel(pressure_level=ds.pressure_level.min()) if self.vertical_dimension == "pressure_level" else ds.sel(h=ds.h.max())
+        top = (
+            ds.sel(pressure_level=ds.pressure_level.min())
+            if self.vertical_dimension == "pressure_level"
+            else ds.sel(h=ds.h.max())
+        )
         top = top.transpose("number", "time", "site_index")
         top["zwd"] = units.meter * zwd_saastamoinen(
             e=top.e.metpy.dequantify(), t=top.t.metpy.dequantify()
         )
         top["zhd"] = units.meter * zhd_saastamoinen(
-            p=top.p.metpy.dequantify(), lat=top.lat.metpy.dequantify(), alt=top.h.metpy.dequantify()
+            p=top.p.metpy.dequantify(),
+            lat=top.lat.metpy.dequantify(),
+            alt=top.h.metpy.dequantify(),
         )
         top["ztd"] = top.zwd + top.zhd
         self.top_level = top
-        logger.info(f"9/11: Computing top-level delays done in {time.perf_counter()-t0:.2f}s")
+        logger.info(
+            f"9/11: Computing top-level delays done in {time.perf_counter() - t0:.2f}s"
+        )
 
     # ---------------- 10 Simpson 积分 ---------------- #
     def simpson_numerical_integration(self) -> None:
         t0 = time.perf_counter()
-        ds = self.ds.sortby("pressure_level") if self.vertical_dimension == "pressure_level" else self.ds
+        ds = (
+            self.ds.sortby("pressure_level")
+            if self.vertical_dimension == "pressure_level"
+            else self.ds
+        )
         x = -ds.transpose("number", "time", "site_index", self.vertical_dimension).h
 
         def _integ(y):
@@ -326,14 +424,24 @@ class ZTDNWMGenerator:
             )
             ds[f"{zxd}_simpson"] += self.top_level[zxd]
         self.ds = ds
-        logger.info(f"10/11: Simpson integration done in {time.perf_counter()-t0:.2f}s")
+        logger.info(
+            f"10/11: Simpson integration done in {time.perf_counter() - t0:.2f}s"
+        )
 
     # -------- 11 垂直插值到站点海拔（自适应并行/向量化） -------- #
     def vertical_interpolate_to_site(self) -> xr.Dataset:
         t0 = time.perf_counter()
         ds = self.ds
-        h_all = ds.h.metpy.dequantify().transpose("number", "time", "site_index", self.vertical_dimension).values
-        ztd_all = ds.ztd_simpson.metpy.dequantify().transpose("number", "time", "site_index", self.vertical_dimension).values
+        h_all = (
+            ds.h.metpy.dequantify()
+            .transpose("number", "time", "site_index", self.vertical_dimension)
+            .values
+        )
+        ztd_all = (
+            ds.ztd_simpson.metpy.dequantify()
+            .transpose("number", "time", "site_index", self.vertical_dimension)
+            .values
+        )
         alt = ds.alt.values
         num_dim, time_dim, site_dim, _ = ztd_all.shape
         total_tasks = num_dim * time_dim * site_dim
@@ -341,9 +449,13 @@ class ZTDNWMGenerator:
         # ---------- 小任务：直接向量化 apply_ufunc ---------- #
         if total_tasks <= self.batch_size:
             logger.info("11/11: Vertical interpolation (vectorized)…")
-            alt_da = xr.DataArray(
-                alt, dims="site_index", coords={"site_index": ds.site_index}
-            ).expand_dims(number=ds.number, time=ds.time).transpose("number", "site_index", "time")
+            alt_da = (
+                xr.DataArray(
+                    alt, dims="site_index", coords={"site_index": ds.site_index}
+                )
+                .expand_dims(number=ds.number, time=ds.time)
+                .transpose("number", "site_index", "time")
+            )
 
             def _log_cubic(x, y, xnew):
                 if x[0] > x[-1]:
@@ -355,14 +467,21 @@ class ZTDNWMGenerator:
                 ds.h.metpy.dequantify(),
                 ds.ztd_simpson.metpy.dequantify(),
                 alt_da,
-                input_core_dims=[[self.vertical_dimension], [self.vertical_dimension], []],
+                input_core_dims=[
+                    [self.vertical_dimension],
+                    [self.vertical_dimension],
+                    [],
+                ],
                 output_core_dims=[[]],
                 vectorize=True,
                 dask="parallelized",
                 output_dtypes=[float],
             )
-            da = result.expand_dims(h=[0]).transpose("number", "site_index", "time", "h") \
-                   * ds.ztd_simpson.metpy.units * 1000
+            da = (
+                result.expand_dims(h=[0]).transpose("number", "site_index", "time", "h")
+                * ds.ztd_simpson.metpy.units
+                * 1000
+            )
             ds_site = xr.Dataset({"ztd_simpson": da})
 
         # ---------- 大任务：joblib 并行 CubicSpline ---------- #
@@ -371,7 +490,8 @@ class ZTDNWMGenerator:
             out = np.empty((num_dim, time_dim, site_dim), dtype=float)
 
             def _interp_one(n, t, s):
-                x = h_all[n, t, s]; y = ztd_all[n, t, s]
+                x = h_all[n, t, s]
+                y = ztd_all[n, t, s]
                 if x[0] > x[-1]:
                     x, y = x[::-1], y[::-1]
                 return np.exp(CubicSpline(x, np.log(np.maximum(y, 1e-12)))(alt[s]))
@@ -386,18 +506,26 @@ class ZTDNWMGenerator:
             da = xr.DataArray(
                 out * ds.ztd_simpson.metpy.units * 1000,
                 dims=("number", "time", "site_index"),
-                coords={"number": ds.number, "time": ds.time, "site_index": ds.site_index},
+                coords={
+                    "number": ds.number,
+                    "time": ds.time,
+                    "site_index": ds.site_index,
+                },
             ).transpose("number", "site_index", "time")
             ds_site = xr.Dataset({"ztd_simpson": da})
 
         ds_site["site"] = ds.site
         self.ds_site = ds_site
-        logger.info(f"11/11: Vertical interpolation done in {time.perf_counter()-t0:.2f}s")
+        logger.info(
+            f"11/11: Vertical interpolation done in {time.perf_counter() - t0:.2f}s"
+        )
         return ds_site
 
     # ------------------------------ run --------------------------- #
     def run(self) -> xr.DataFrame:
-        logger.info(f"Start ZTD computation (vertical_dimension={self.vertical_dimension})")
+        logger.info(
+            f"Start ZTD computation (vertical_dimension={self.vertical_dimension})"
+        )
         self.read_met_file()
         self.horizental_interpolate()
         self.quantify_met_parameters()
