@@ -1,0 +1,25 @@
+[project]
+name = "nwm"
+version = "0.1.0"
+description = "Add your description here"
+readme = "README.md"
+authors = [
+    { name = "Aki", email = "838013444@qq.com" }
+]
+requires-python = ">=3.10"
+dependencies = [
+    "joblib>=1.5.1",
+    "loguru>=0.7.3",
+    "metpy>=1.7.0",
+    "numpy>=2.2.6",
+    "scipy>=1.15.3",
+    "tqdm-joblib>=0.0.4",
+    "xarray[io]>=2025.6.1",
+]
+
+[project.scripts]
+nwm = "nwm:main"
+
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
