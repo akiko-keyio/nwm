@@ -10,7 +10,6 @@ from nwm.geoid import GeoidHeight
 from nwm.height_convert import geopotential_to_geometric
 from nwm.Interprepter import (
     LinearInterpolator,
-    LogCubicSplineInterpolator,
     LogLinearInterpolator,
 )
 from tqdm_joblib import ParallelPbar
@@ -437,34 +436,42 @@ class ZTDNWMGenerator:
         """Interpolate ``ztd_simpson`` to station altitude."""
         import numpy as np
         import xarray as xr
+        from scipy.interpolate import CubicSpline
 
         ds = self.ds
-        numbers = ds.number.values if "number" in ds.dims else np.array([0])
-        times = ds.time.values
-        sites = ds.site_index.values
-        alt = ds.alt.values
 
-        ztd = ds["ztd_simpson"].values
-        h = ds.h.values
+        h = ds.h.metpy.dequantify()
+        ztd = ds["ztd_simpson"].metpy.dequantify()
+        alt = ds.alt
 
-        out = np.empty((len(numbers), len(sites), len(times)))
-        for mi, _ in enumerate(numbers):
-            for ti, _ in enumerate(times):
-                for si, a in enumerate(alt):
-                    out[mi, si, ti] = LogCubicSplineInterpolator(
-                        h[mi, ti, :, si], ztd[mi, ti, si, :]
-                    ).interpolate(a)
+        if "number" not in ds.dims:
+            ds = ds.expand_dims(number=[0])
+
+        alt_da = alt.expand_dims({"number": ds.number, "time": ds.time})
+        alt_da = alt_da.transpose("number", "site_index", "time")
+
+        def _log_cubic(x, y, x_new):
+            if x[0] > x[-1]:
+                x = x[::-1]
+                y = y[::-1]
+            logy = np.log(np.maximum(y, 1e-10))
+            return np.exp(CubicSpline(x, logy)(x_new))
+
+        result = xr.apply_ufunc(
+            _log_cubic,
+            h,
+            ztd,
+            alt_da,
+            input_core_dims=[[self.vertical_dimension], [self.vertical_dimension], []],
+            output_core_dims=[[]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
 
         da = (
-            xr.DataArray(
-                out[:, :, :, np.newaxis],
-                dims=["number", "site_index", "time", "h"],
-                coords={
-                    "number": numbers,
-                    "site_index": sites,
-                    "time": times,
-                    "h": [0],
-                },
+            result.expand_dims({"h": [0]}).transpose(
+                "number", "site_index", "time", "h"
             )
             * ds["ztd_simpson"].metpy.units
             * 1000.0
