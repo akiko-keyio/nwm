@@ -440,41 +440,39 @@ class ZTDNWMGenerator:
 
         ds = self.ds
 
-        h = ds.h.metpy.dequantify().values
-        ztd = ds["ztd_simpson"].metpy.dequantify().values
-        alt = ds.alt.values
+        h = ds.h.metpy.dequantify()
+        ztd = ds["ztd_simpson"].metpy.dequantify()
+        alt = ds.alt
 
         if "number" not in ds.dims:
             ds = ds.expand_dims(number=[0])
 
-        number_len = ds.number.size
-        time_len = ds.time.size
-        site_len = ds.site_index.size
+        alt_da = alt.expand_dims({"number": ds.number, "time": ds.time})
+        alt_da = alt_da.transpose("number", "site_index", "time")
 
-        result = np.empty((number_len, site_len, time_len))
-        for i in range(site_len):
-            for n in range(number_len):
-                for t in range(time_len):
-                    x = h[n, t, :, i]
-                    y = ztd[n, t, i, :]
-                    if x[0] > x[-1]:
-                        x = x[::-1]
-                        y = y[::-1]
-                    logy = np.log(np.maximum(y, 1e-10))
-                    result[n, i, t] = np.exp(CubicSpline(x, logy)(alt[i]))
+        def _log_cubic(x, y, x_new):
+            if x[0] > x[-1]:
+                x = x[::-1]
+                y = y[::-1]
+            logy = np.log(np.maximum(y, 1e-10))
+            return np.exp(CubicSpline(x, logy)(x_new))
+
+        result = xr.apply_ufunc(
+            _log_cubic,
+            h,
+            ztd,
+            alt_da,
+            input_core_dims=[[self.vertical_dimension], [self.vertical_dimension], []],
+            output_core_dims=[[]],
+            vectorize=True,
+            dask="parallelized",
+            output_dtypes=[float],
+        )
 
         da = (
-            xr.DataArray(
-                result,
-                dims=["number", "site_index", "time"],
-                coords={
-                    "number": ds.number,
-                    "site_index": ds.site_index,
-                    "time": ds.time,
-                },
+            result.expand_dims({"h": [0]}).transpose(
+                "number", "site_index", "time", "h"
             )
-            .expand_dims({"h": [0]})
-            .transpose("number", "site_index", "time", "h")
             * ds["ztd_simpson"].metpy.units
             * 1000.0
         )

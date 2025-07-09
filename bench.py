@@ -1,26 +1,28 @@
 import time
-from nwm.ztd_nwm import ZTDNWMGenerator
+from nwm.ztd_nwm_fast4 import ZTDNWMGenerator
+
 import pandas as pd
 import numpy as np
 from scipy.stats import zscore
 
-# ---------------- 生成器 ----------------
+# ---------------- 生成器 ---------------
+location=pd.read_csv(r"data/location_gnss.csv")
+location=pd.concat([location]*1000)
 zg = ZTDNWMGenerator(
     r"data/era5_pl_025_2023010100.nc",
-    location=pd.read_csv(r"data/location_gnss.csv"),
+    location=location,
     egm_type="egm96-5",
     n_jobs=-1
 )
 
 # ----------- ⏱️ 计时开始 -----------
 t0 = time.perf_counter()
-
 df_nwm = zg.run()
+print(df_nwm)
 
 dt = time.perf_counter() - t0
-print(f"zg.run() 用时: {dt:.2f} 秒")
+print(f"zg.run() 用时: {dt:.2f} 秒 共 {len(location)} pt {len(location)/dt:.1f} iter/s")
 # ----------- ⏱️ 计时结束 -----------
-
 
 # ---------------- 后续分析 ----------------
 df_gnss = pd.read_csv(r"data/ztd_gnss.csv")
