@@ -6,19 +6,20 @@ computation follows the eleven steps originally implemented in
 ``ztd_nwm.py``:
 
 1. Read and pre-process the meteorological file.
-2. Perform horizontal interpolation to station coordinates.
-3. Quantify meteorological parameters with proper units.
-4. Convert geopotential height to orthometric height.  The formulae are
+2. Format dataset dimensions and longitude.
+3. Perform horizontal interpolation to station coordinates.
+4. Quantify meteorological parameters with proper units.
+5. Convert geopotential height to orthometric height.  The formulae are
    taken from the ERA5 documentation_.
-5. Transform orthometric height to ellipsoidal height using the selected
+6. Transform orthometric height to ellipsoidal height using the selected
    geoid model.
-6. Compute water vapour pressure ``e``.
-7. Optionally resample to an ellipsoidal vertical grid.
-8. Derive refractive indices.  Recommended constants come from
+7. Compute water vapour pressure ``e``.
+8. Optionally resample to an ellipsoidal vertical grid.
+9. Derive refractive indices.  Recommended constants come from
    "Troposphere modeling and filtering for precise GPS leveling" [2004].
-9. Compute top level hydrostatic and wet delays.
-10. Integrate refractivity using Simpson's rule.
-11. Interpolate ZTD to the exact station altitude.
+10. Compute top level hydrostatic and wet delays.
+11. Integrate refractivity using Simpson's rule.
+12. Interpolate ZTD to the exact station altitude.
 
 References
 ----------
@@ -45,17 +46,18 @@ from joblib import Parallel, delayed
 from loguru import logger
 from metpy.units import units
 from scipy.integrate import cumulative_simpson
-from scipy.interpolate import CubicSpline, RegularGridInterpolator, RectSphereBivariateSpline
+from scipy.interpolate import (
+    CubicSpline,
+    RegularGridInterpolator,
+    RectSphereBivariateSpline,
+)
 from tqdm_joblib import ParallelPbar
 
 from nwm.Interprepter import LinearInterpolator, LogLinearInterpolator
 from nwm.geoid import GeoidHeight
 from nwm.height_convert import geopotential_to_geometric
 from nwm.ztd_met import zhd_saastamoinen, zwd_saastamoinen
-import time, logging
-import numpy as np
-import xarray as xr
-from scipy.interpolate import RegularGridInterpolator, RectSphereBivariateSpline
+
 
 class ZTDNWMGenerator:
     # ----------------------------- 初始化 ---------------------------- #
@@ -73,8 +75,7 @@ class ZTDNWMGenerator:
         n_jobs: int = -1,
         batch_size: int = 100_000,
         load_method: str = "auto",
-            horizental_interpolation_method: str = "linear",
-
+        horizental_interpolation_method: str = "linear",
     ):
         self.nwm_path = Path(nwm_path)
         self.location = location.copy() if location is not None else None
@@ -137,7 +138,7 @@ class ZTDNWMGenerator:
             return ds
 
         def _load_lazy() -> xr.Dataset:
-            return xr.open_dataset(self.nwm_path,chunks="auto")
+            return xr.open_dataset(self.nwm_path, chunks="auto")
 
         method = self.load_method
         loaders = {
@@ -161,12 +162,11 @@ class ZTDNWMGenerator:
                 raise ValueError(f"Unknown load_method: {method}")
             self.ds = loaders[method]()
         logger.info(
-            f"1/11: Reading meteorological file done in {time.perf_counter() - t0:.2f}s"
+            f"1/12: Reading meteorological file done in {time.perf_counter() - t0:.2f}s"
         )
 
     def format_dataset(self):
-
-        t0=time.perf_counter()
+        t0 = time.perf_counter()
         # === 后续维度重命名与补维保持不变 ===
         rename_map = {
             "level": "pressure_level",
@@ -185,13 +185,15 @@ class ZTDNWMGenerator:
             logger.info(f"Expanding Number: {exist}")
             self.ds = self.ds.expand_dims("number")
 
-        def normalize_longitude(ds: xr.Dataset, *, drop_duplicate: bool = True, roll: bool = True) -> xr.Dataset:
+        def normalize_longitude(
+            ds: xr.Dataset, *, drop_duplicate: bool = True, roll: bool = True
+        ) -> xr.Dataset:
             if drop_duplicate and "longitude" in ds.data_vars:
                 ds = ds.drop_vars("longitude")
             lon = ds.longitude
             if not (lon > 180).any():
                 return ds
-            logger.info(f"Normalizing longitude")
+            logger.info("Normalizing longitude")
             new_lon = ((lon + 180) % 360) - 180
             if roll:
                 shift = int((new_lon < 0).sum())
@@ -200,10 +202,9 @@ class ZTDNWMGenerator:
 
             ds = ds.assign_coords(longitude=("longitude", new_lon.values))
             return ds
+
         self.ds = normalize_longitude(self.ds)
-        logger.info(
-            f"1/11: Format file done in {time.perf_counter() - t0:.2f}s"
-        )
+        logger.info(f"2/12: Format file done in {time.perf_counter() - t0:.2f}s")
 
     # ---------------------- 2  水平插值 --------------------------- #
     def horizental_interpolate(self) -> None:
@@ -218,7 +219,7 @@ class ZTDNWMGenerator:
         """
 
         t0 = time.perf_counter()
-        method= self.horizental_interpolation_method
+        method = self.horizental_interpolation_method
 
         # -------- 0. 目标为空：直接 stack --------
         if self.location is None:
@@ -226,7 +227,9 @@ class ZTDNWMGenerator:
             self.ds["site"] = self.ds.site_index
             self.ds["alt"] = 0
             logger.info("No target sites: stacked original grid.")
-            logger.info(f"2/11: Horizontal interpolation done in {time.perf_counter() - t0:.2f}s")
+            logger.info(
+                f"3/12: Horizontal interpolation done in {time.perf_counter() - t0:.2f}s"
+            )
             return
 
         # -------- 1. 通用准备 --------
@@ -272,7 +275,7 @@ class ZTDNWMGenerator:
                     arr2 = np.moveaxis(
                         da.values,
                         (lat_ax, lon_ax) + tuple(other_axes),
-                        (0, 1) + tuple(2 + np.arange(len(other_axes)))
+                        (0, 1) + tuple(2 + np.arange(len(other_axes))),
                     )
                     other_shape = arr2.shape[2:]  # ★ 修正点
                     interp = RegularGridInterpolator(
@@ -294,8 +297,7 @@ class ZTDNWMGenerator:
                     res_list = []
                     for k in range(flat.shape[-1]):
                         spline = RectSphereBivariateSpline(
-                            theta, phi, flat[..., k],
-                            s=0.0, pole_continuity=True
+                            theta, phi, flat[..., k], s=0.0, pole_continuity=True
                         )
                         try:
                             res_list.append(spline.ev(theta_q, phi_q))
@@ -306,13 +308,13 @@ class ZTDNWMGenerator:
                 # ---- reshape & moveaxis ----
                 if res.ndim > 1:
                     res2 = res.reshape(len(pts_lat), *other_shape)
-                    res2 = np.moveaxis(res2,
-                                       range(1, 1 + len(other_axes)),
-                                       other_axes)
+                    res2 = np.moveaxis(res2, range(1, 1 + len(other_axes)), other_axes)
                 else:
                     res2 = res[:, None]
 
-                new_dims = tuple(d for d in dims if d not in ("latitude", "longitude")) + ("site_index",)
+                new_dims = tuple(
+                    d for d in dims if d not in ("latitude", "longitude")
+                ) + ("site_index",)
                 coords = {d: ds.coords[d] for d in new_dims if d != "site_index"}
                 coords["site_index"] = loc.index
                 new_vars[vn] = xr.DataArray(res2, dims=new_dims, coords=coords, name=vn)
@@ -328,7 +330,9 @@ class ZTDNWMGenerator:
         ds2.coords["alt"] = ds2.alt
 
         self.ds = ds2
-        logger.info(f"2/11: Horizontal interpolation done in {time.perf_counter() - t0:.2f}s")
+        logger.info(
+            f"3/12: Horizontal interpolation done in {time.perf_counter() - t0:.2f}s"
+        )
 
     # --------------------------- 3 量纲 --------------------------- #
     def quantify_met_parameters(self) -> None:
@@ -337,7 +341,7 @@ class ZTDNWMGenerator:
         self.ds["z"] = self.ds["z"] * units.meters**2 / units.second**2
         self.ds["t"] = self.ds["t"] * units.kelvin
         logger.info(
-            f"3/11: Quantifying meteorological parameters done in {time.perf_counter() - t0:.2f}s"
+            f"4/12: Quantifying meteorological parameters done in {time.perf_counter() - t0:.2f}s"
         )
 
     # --------------- 4 Geopotential → Orthometric ---------------- #
@@ -360,7 +364,7 @@ class ZTDNWMGenerator:
         else:
             raise ValueError("gravity_variation must be ignore or latitude")
         logger.info(
-            f"4/11: Geopotential→Orthometric done in {time.perf_counter() - t0:.2f}s"
+            f"5/12: Geopotential→Orthometric done in {time.perf_counter() - t0:.2f}s"
         )
 
     # ------------- 5 Orthometric → Ellipsoidal ------------------- #
@@ -381,7 +385,7 @@ class ZTDNWMGenerator:
         )
         self.ds["h"] = self.ds["h"] + anom_da
         logger.info(
-            f"5/11: Orthometric→Ellipsoidal done in {time.perf_counter() - t0:.2f}s"
+            f"6/12: Orthometric→Ellipsoidal done in {time.perf_counter() - t0:.2f}s"
         )
 
     # ------------------------- 6 计算 e --------------------------- #
@@ -392,14 +396,14 @@ class ZTDNWMGenerator:
         else:
             self.ds["e"] = (self.ds.q * self.ds.p) / (0.622 + 0.378 * self.ds.q)
         logger.info(
-            f"6/11: Computing water-vapor pressure done in {time.perf_counter() - t0:.2f}s"
+            f"7/12: Computing water-vapor pressure done in {time.perf_counter() - t0:.2f}s"
         )
 
     # ------------------- 7 ellipsoidal 重采样 -------------------- #
     def resample_to_ellipsoidal(self) -> None:
         t0 = time.perf_counter()
         if self.vertical_dimension == "pressure_level":
-            logger.info("7/11: Skipping resampling (pressure levels)")
+            logger.info("8/12: Skipping resampling (pressure levels)")
             return
 
         ds, loc = self.ds, self.location
@@ -446,7 +450,7 @@ class ZTDNWMGenerator:
         ds_new["lon"], ds_new["lat"], ds_new["site"] = ds.lon, ds.lat, ds.site
         self.ds = ds_new.sortby("h", ascending=False)
         logger.info(
-            f"7/11: Resampling to ellipsoidal done in {time.perf_counter() - t0:.2f}s"
+            f"8/12: Resampling to ellipsoidal done in {time.perf_counter() - t0:.2f}s"
         )
 
     # ------------- 8 折射率计算 ---------------- #
@@ -492,7 +496,7 @@ class ZTDNWMGenerator:
         self.ds["n_d"], self.ds["n_v"] = n_d, n_v
         self.ds["z_d_inv"], self.ds["z_v_inv"] = z_d_inv, z_v_inv
         logger.info(
-            f"8/11: Computing refractive index done in {time.perf_counter() - t0:.2f}s"
+            f"9/12: Computing refractive index done in {time.perf_counter() - t0:.2f}s"
         )
 
     # ---------------- 9 顶层延迟 ---------------- #
@@ -516,7 +520,7 @@ class ZTDNWMGenerator:
         top["ztd"] = top.zwd + top.zhd
         self.top_level = top
         logger.info(
-            f"9/11: Computing top-level delays done in {time.perf_counter() - t0:.2f}s"
+            f"10/12: Computing top-level delays done in {time.perf_counter() - t0:.2f}s"
         )
 
     # ---------------- 10 Simpson 积分 ---------------- #
@@ -542,7 +546,7 @@ class ZTDNWMGenerator:
             ds[f"{zxd}_simpson"] += self.top_level[zxd]
         self.ds = ds
         logger.info(
-            f"10/11: Simpson integration done in {time.perf_counter() - t0:.2f}s"
+            f"11/12: Simpson integration done in {time.perf_counter() - t0:.2f}s"
         )
 
     # -------- 11 垂直插值到站点海拔（自适应并行/向量化） -------- #
@@ -565,7 +569,7 @@ class ZTDNWMGenerator:
 
         # ---------- 小任务：直接向量化 apply_ufunc ---------- #
         if total_tasks <= self.batch_size:
-            logger.info("11/11: Vertical interpolation (vectorized)…")
+            logger.info("12/12: Vertical interpolation (vectorized)…")
             alt_da = (
                 xr.DataArray(
                     alt, dims="site_index", coords={"site_index": ds.site_index}
@@ -603,7 +607,7 @@ class ZTDNWMGenerator:
 
         # ---------- 大任务：joblib 并行 CubicSpline ---------- #
         else:
-            logger.info("11/11: Vertical interpolation (CubicSpline, joblib parallel)…")
+            logger.info("12/12: Vertical interpolation (CubicSpline, joblib parallel)…")
             out = np.empty((num_dim, time_dim, site_dim), dtype=float)
 
             def _interp_one(n, t, s):
@@ -634,7 +638,7 @@ class ZTDNWMGenerator:
         ds_site["site"] = ds.site
         self.ds_site = ds_site
         logger.info(
-            f"11/11: Vertical interpolation done in {time.perf_counter() - t0:.2f}s"
+            f"12/12: Vertical interpolation done in {time.perf_counter() - t0:.2f}s"
         )
         return ds_site
 
