@@ -84,7 +84,7 @@ class ZTDNWMGenerator:
         self.n_jobs = n_jobs
         self.batch_size = batch_size
         self.load_in_memory = load_in_memory
-        self.stream_copy = True
+        self.stream_copy = stream_copy
 
         self.ds: xr.Dataset | None = None
         self.ds_site: xr.Dataset | None = None
@@ -150,6 +150,13 @@ class ZTDNWMGenerator:
         if "number" not in self.ds.dims:
             self.ds = self.ds.expand_dims("number")
 
+        lon = self.ds.coords["longitude"]
+        if (lon > 180).any():
+            logger.info("Check Longitude contain (0,360), transform to (-180,180]")
+            self.ds = self.ds.assign_coords(
+                longitude=((lon + 180) % 360) - 180
+            ).sortby("longitude")
+
         logger.info(
             f"1/11: Reading meteorological file done in {time.perf_counter() - t0:.2f}s"
         )
@@ -168,6 +175,7 @@ class ZTDNWMGenerator:
 
             new_vars: Dict[str, xr.DataArray] = {}
             for vn, da in ds.data_vars.items():
+                logger.info(f"Interpolating {vn}")
                 dims = da.dims
                 if {"latitude", "longitude"} <= set(dims):
                     lat_ax, lon_ax = dims.index("latitude"), dims.index("longitude")

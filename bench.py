@@ -1,5 +1,5 @@
 import time
-from nwm.ztd_nwm import ZTDNWMGenerator
+from nwm.ztd_nwm_old import ZTDNWMGenerator
 
 import pandas as pd
 import numpy as np
@@ -7,9 +7,10 @@ from scipy.stats import zscore
 
 # ---------------- 生成器 ---------------
 location = pd.read_csv(r"data/location_gnss.csv")
-location = pd.concat([location] * 10)
+
+location = pd.concat([location] )
 zg = ZTDNWMGenerator(
-    r"data/era5_pl_025_2023010100.nc", location=location, egm_type="egm96-5", n_jobs=-1
+    r"data/failure/elda_pl_9_025_2023010100", location=location, egm_type="egm96-5", n_jobs=-1
 )
 
 # ----------- ⏱️ 计时开始 -----------
