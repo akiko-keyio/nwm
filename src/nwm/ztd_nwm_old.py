@@ -31,7 +31,6 @@ class ZTDNWMGenerator:
             swap_interp_step=None,
             n_jobs=-3,
             batch_size=1000,
-            load_in_memory=True,
     ):
 
         self.nwm_path = nwm_path

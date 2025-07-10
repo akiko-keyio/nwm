@@ -70,7 +70,7 @@ class ZTDNWMGenerator:
         n_jobs: int = -1,
         batch_size: int = 100_000,
         load_in_memory: bool = True,
-        stream_copy=True,
+        stream_copy=False,
     ):
         self.nwm_path = Path(nwm_path)
         self.location = location.copy() if location is not None else None
@@ -134,6 +134,10 @@ class ZTDNWMGenerator:
                 # 懒加载：留给后续 dask 计算
                 self.ds = xr.open_dataset(self.nwm_path)
 
+        logger.info(
+            f"1/11: Reading meteorological file done in {time.perf_counter() - t0:.2f}s"
+        )
+
         # === 后续维度重命名与补维保持不变 ===
         rename_map = {
             "level": "pressure_level",
@@ -152,14 +156,11 @@ class ZTDNWMGenerator:
 
         lon = self.ds.coords["longitude"]
         if (lon > 180).any():
-            logger.info("Check Longitude contain (0,360), transform to (-180,180]")
+            logger.info("Longitude Range from (0,360), transform to (-180,180]")
             self.ds = self.ds.assign_coords(
                 longitude=((lon + 180) % 360) - 180
             ).sortby("longitude")
 
-        logger.info(
-            f"1/11: Reading meteorological file done in {time.perf_counter() - t0:.2f}s"
-        )
 
     # ---------------------- 2 水平插值 --------------------------- #
     def horizental_interpolate(self) -> None:
