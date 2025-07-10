@@ -70,7 +70,6 @@ class ZTDNWMGenerator:
         n_jobs: int = -1,
         batch_size: int = 100_000,
         load_method: str = "auto",
-
     ):
         self.nwm_path = Path(nwm_path)
         self.location = location.copy() if location is not None else None
@@ -177,13 +176,10 @@ class ZTDNWMGenerator:
 
         lon = self.ds.coords["longitude"]
         if (lon > 180).any():
-
             logger.info("Longitude Range from (0,360), transform to (-180,180]")
-            self.ds = self.ds.assign_coords(
-                longitude=((lon + 180) % 360) - 180
-            ).sortby("longitude")
-
-
+            self.ds = self.ds.assign_coords(longitude=((lon + 180) % 360) - 180).sortby(
+                "longitude"
+            )
 
     # ---------------------- 2 水平插值 --------------------------- #
     def horizental_interpolate(self) -> None:
