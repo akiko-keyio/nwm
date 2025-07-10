@@ -1,5 +1,5 @@
 import time
-from nwm.ztd_nwm import ZTDNWMGenerator
+from nwm.ztd_nwm_sphere import ZTDNWMGenerator
 
 import pandas as pd
 import numpy as np
@@ -12,7 +12,11 @@ nwm_path=r"data/failure/elda_pl_9_025_2023010100"
 nwm_path=r"data/failure/ERA5_20230101_00_1h.nc"
 location = pd.concat([location] )
 zg = ZTDNWMGenerator(
-    nwm_path, location=location, egm_type="egm96-5", n_jobs=-1
+    nwm_path,
+    location=location,
+    egm_type="egm96-5",
+    n_jobs=-1,
+    horizental_interpolation_method='sphere_spline'
 )
 
 # ----------- ⏱️ 计时开始 -----------

@@ -24,3 +24,9 @@ nwm = "nwm:main"
 [build-system]
 requires = ["hatchling"]
 build-backend = "hatchling.build"
+
+[dependency-groups]
+dev = [
+    "jupyterlab>=4.4.4",
+    "notebook>=7.4.4",
+]
