@@ -1,2 +1,2 @@
-def main() -> None:
-    print("Hello from nwm!")
+from nwm.ztd_nwm import ZTDNWMGenerator
+__all__=['ZTDNWMGenerator']
