@@ -54,6 +54,13 @@ class ZTDNWMGenerator:
 
         self.ds = xr.open_dataset(self.nwm_path)    # ← 关闭时不要写回)
 
+        lon = self.ds.coords["longitude"]
+        if (lon > 180).any():
+            logger.info("Check Longitude contain (0,360), transform to (-180,180]")
+            self.ds = self.ds.assign_coords(
+                longitude=((lon + 180) % 360) - 180
+            ).sortby("longitude")
+
         # self.ds=xr.open_dataset(self.nwm_path, chunks='auto')
         rename_map = {
             "level": "pressure_level",
