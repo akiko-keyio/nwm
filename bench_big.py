@@ -12,9 +12,7 @@ zg = ZTDNWMGenerator(
     location=location,
     egm_type="egm96-5",
     n_jobs=-1,
-    load_in_memory=True,
-    stream_copy=True,
-
+    load_method="auto",
 )
 
 # ----------- ⏱️ 计时开始 -----------

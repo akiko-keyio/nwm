@@ -69,8 +69,7 @@ class ZTDNWMGenerator:
         swap_interp_step: int | None = None,
         n_jobs: int = -1,
         batch_size: int = 100_000,
-        load_in_memory: bool = True,
-        stream_copy=True,
+        load_method: str = "auto",
     ):
         self.nwm_path = Path(nwm_path)
         self.location = location.copy() if location is not None else None
@@ -83,8 +82,7 @@ class ZTDNWMGenerator:
         self.swap_interp_step = swap_interp_step
         self.n_jobs = n_jobs
         self.batch_size = batch_size
-        self.load_in_memory = load_in_memory
-        self.stream_copy = stream_copy
+        self.load_method = load_method
 
         self.ds: xr.Dataset | None = None
         self.ds_site: xr.Dataset | None = None
@@ -93,7 +91,8 @@ class ZTDNWMGenerator:
     # -------------------------- 1 读文件 -------------------------- #
     def read_met_file(self) -> None:
         t0 = time.perf_counter()
-        if self.stream_copy:
+
+        def _load_stream() -> xr.Dataset:
             import fsspec
 
             mem_url = "memory://temp.nc"
@@ -103,36 +102,57 @@ class ZTDNWMGenerator:
             ):
                 shutil.copyfileobj(fsrc, fdst, length=1024 << 20)
             with fsspec.open(mem_url, "rb") as f:
-                self.ds = xr.open_dataset(f)
-                self.ds.load()
-        else:
-            if self.load_in_memory:
+                ds = xr.open_dataset(f)
+                ds.load()
+            return ds
 
-                def _is_hdf5(path: Path, blocksize: int = 8) -> bool:
-                    """快速判断文件是否以 HDF5 标识开头。"""
-                    with path.open("rb") as f:
-                        header = f.read(blocksize)
-                    return header == b"\x89HDF\r\n\x1a\n"
+        def _is_hdf5(path: Path, blocksize: int = 8) -> bool:
+            """Check whether file header matches the HDF5 signature."""
 
-                # 1️⃣ 本地文件：直接用最快 backend；远程路径可另行处理
-                engine = "h5netcdf" if _is_hdf5(self.nwm_path) else None
+            with path.open("rb") as f:
+                header = f.read(blocksize)
+            return header == b"\x89HDF\r\n\x1a\n"
+
+        def _load_memory() -> xr.Dataset:
+            engine = "h5netcdf" if _is_hdf5(self.nwm_path) else None
+            try:
+                ds = xr.open_dataset(
+                    self.nwm_path,
+                    engine=engine,
+                    chunks="auto",
+                    mask_and_scale=True,
+                    decode_times=True,
+                ).load()
+            except Exception as e:
+                logger.warning(
+                    f"{engine or 'default'} backend failed ({e}); retry with default engine"
+                )
+                ds = xr.open_dataset(self.nwm_path).load()
+            return ds
+
+        def _load_lazy() -> xr.Dataset:
+            return xr.open_dataset(self.nwm_path)
+
+        method = self.load_method
+        loaders = {
+            "stream": _load_stream,
+            "memory": _load_memory,
+            "lazy": _load_lazy,
+        }
+
+        if method == "auto":
+            for name in ("stream", "memory", "lazy"):
                 try:
-                    self.ds = xr.open_dataset(
-                        self.nwm_path,
-                        engine=engine,  # None → xarray 自动检测
-                        chunks="auto",  # 允许 dask 并行 I/O
-                        mask_and_scale=True,
-                        decode_times=True,
-                    ).load()  # 真正读到内存
-                except Exception as e:
-                    # fallback 双保
-                    logger.warning(
-                        f"{engine or 'default'} backend failed ({e}); retry with default engine"
-                    )
-                    self.ds = xr.open_dataset(self.nwm_path).load()
+                    self.ds = loaders[name]()
+                    break
+                except Exception as e:  # pragma: no cover - log only
+                    logger.warning(f"{name} loading failed ({e})")
             else:
-                # 懒加载：留给后续 dask 计算
-                self.ds = xr.open_dataset(self.nwm_path)
+                raise RuntimeError("Failed to load dataset")
+        else:
+            if method not in loaders:
+                raise ValueError(f"Unknown load_method: {method}")
+            self.ds = loaders[method]()
 
         # === 后续维度重命名与补维保持不变 ===
         rename_map = {
@@ -153,9 +173,9 @@ class ZTDNWMGenerator:
         lon = self.ds.coords["longitude"]
         if (lon > 180).any():
             logger.info("Check Longitude contain (0,360), transform to (-180,180]")
-            self.ds = self.ds.assign_coords(
-                longitude=((lon + 180) % 360) - 180
-            ).sortby("longitude")
+            self.ds = self.ds.assign_coords(longitude=((lon + 180) % 360) - 180).sortby(
+                "longitude"
+            )
 
         logger.info(
             f"1/11: Reading meteorological file done in {time.perf_counter() - t0:.2f}s"
