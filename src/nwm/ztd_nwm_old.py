@@ -5,7 +5,6 @@ from joblib import delayed
 from metpy.units import units
 from scipy.integrate import cumulative_simpson
 from loguru import logger
-from scipy.interpolate import RectSphereBivariateSpline
 from nwm.ztd_met import zhd_saastamoinen, zwd_saastamoinen
 from nwm.geoid import GeoidHeight
 from nwm.height_convert import geopotential_to_geometric
@@ -31,8 +30,8 @@ class ZTDNWMGenerator:
             swap_interp_step=None,
             n_jobs=-3,
             batch_size=1000,
-    ):
 
+    ):
         self.nwm_path = nwm_path
         self.location = location.copy()
         self.egm_type = egm_type
@@ -48,23 +47,21 @@ class ZTDNWMGenerator:
         self.ds_sap = None
         self.batch_size = batch_size
 
-
     def read_met_file(self):
-
-        self.ds = xr.open_dataset(self.nwm_path)    # ← 关闭时不要写回)
+        self.ds = xr.open_dataset(self.nwm_path)  # ← 关闭时不要写回)
 
         lon = self.ds.coords["longitude"]
         if (lon > 180).any():
             logger.info("Check Longitude contain (0,360), transform to (-180,180]")
-            self.ds = self.ds.assign_coords(
-                longitude=((lon + 180) % 360) - 180
-            ).sortby("longitude")
+            self.ds = self.ds.assign_coords(longitude=((lon + 180) % 360) - 180).sortby(
+                "longitude"
+            )
 
         # self.ds=xr.open_dataset(self.nwm_path, chunks='auto')
         rename_map = {
             "level": "pressure_level",
             "isobaricInhPa": "pressure_level",
-            "valid_time": "time"
+            "valid_time": "time",
         }
         # 过滤出实际存在的键
         existing = {k: v for k, v in rename_map.items() if k in self.ds}
@@ -76,12 +73,12 @@ class ZTDNWMGenerator:
 
         try:
             self.ds = self.ds.expand_dims("time")
-        except:
+        except Exception:
             pass
 
         try:
             self.ds = self.ds.expand_dims("number")
-        except:
+        except Exception:
             pass
 
     def horizental_interpolate(self):
@@ -96,9 +93,11 @@ class ZTDNWMGenerator:
 
         lon = self.ds.longitude.values
         lon_step = lon[1] - lon[0]
-        is_global = (np.isclose(lon.min(), 0)
-                     and np.isclose(360 % lon_step, 0)
-                     and np.isclose(lon.max() + lon_step, 360))
+        is_global = (
+            np.isclose(lon.min(), 0)
+            and np.isclose(360 % lon_step, 0)
+            and np.isclose(lon.max() + lon_step, 360)
+        )
 
         if is_global:
             # 用 pad(mode="wrap") 在 longitude 轴尾部复制第一个切片
@@ -131,28 +130,27 @@ class ZTDNWMGenerator:
             coords={"site_index": self.location["site_index"]},
         )
         logger.info("Interpolate to site")
-        self.ds = self.ds.interp(longitude=lon, latitude=lat, method="linear",assume_sorted =True)
+        self.ds = self.ds.interp(
+            longitude=lon, latitude=lat, method="linear", assume_sorted=True
+        )
         self.ds = self.ds.rename({"longitude": "lon", "latitude": "lat"})
         self.ds = xr.merge([self.ds, alt, site])
         self.ds.coords["alt"] = self.ds.alt
-
-
 
     def quantify_met_parameters(self):
         self.ds["p"] = self.ds.pressure_level * units.hPa
         self.ds = self.ds.metpy.quantify()
 
     def geopotential_to_orthometric(self):
-
         if self.gravity_variation == "ignore":
             # https://confluence.ecmwf.int/display/CKB/ERA5%3A+data+documentation#heading-SpatialreferencesystemsandEarthmodel
             Re = 6371.2229e3 * units.meters
-            G = 9.80665 * units.meters / units.second ** 2
+            G = 9.80665 * units.meters / units.second**2
             geopotential_height = self.ds["z"] / G
             self.ds["h"] = (geopotential_height * Re) / (Re - geopotential_height)
 
         elif self.gravity_variation == "latitude":
-            G = 9.80665 * units.meters / units.second ** 2
+            G = 9.80665 * units.meters / units.second**2
             geopotential_height = self.ds.z / G
             if len(self.ds.lat.shape) == 1:
                 lat = np.expand_dims(self.ds.lat, axis=(0, 1))
@@ -173,15 +171,15 @@ class ZTDNWMGenerator:
             return geoid.get(lat, lon)
 
         gravity_anomaly = (
-                xr.apply_ufunc(
-                    get_geoid_height,
-                    self.ds["lat"],
-                    self.ds["lon"],
-                    vectorize=True,
-                    dask="parallelized",
-                    output_dtypes=[float],
-                )
-                * units.meters
+            xr.apply_ufunc(
+                get_geoid_height,
+                self.ds["lat"],
+                self.ds["lon"],
+                vectorize=True,
+                dask="parallelized",
+                output_dtypes=[float],
+            )
+            * units.meters
         )
 
         self.ds["h"] = self.ds["h"] + gravity_anomaly
@@ -222,7 +220,7 @@ class ZTDNWMGenerator:
             self.ds["e"] = (self.ds["q"] * self.ds["p"]) / 0.622
         elif self.compute_e_mode == "mode2":
             self.ds["e"] = (self.ds["q"] * self.ds["p"]) / (
-                    0.622 + 0.378 * self.ds["q"]
+                0.622 + 0.378 * self.ds["q"]
             )
 
     def resample_to_ellipsoidal(self):
@@ -294,7 +292,6 @@ class ZTDNWMGenerator:
         self.ds = ds_swap
 
     def compute_refractive_index(self):
-
         # # GNSS定位定时中的对流层延迟模型优化研究_苏行
         # k1 = 77.604 * units.kelvin / units.hPa
         # k2 = 69.4 * units.kelvin / units.hPa
@@ -320,31 +317,31 @@ class ZTDNWMGenerator:
         #     delft, the netherlands, 2004, equation (4.36)
         k1 = 77.689 * units.kelvin / units.hPa
         k2 = 71.2952 * units.kelvin / units.hPa
-        k3 = 375463 * units.kelvin ** 2 / units.hPa
+        k3 = 375463 * units.kelvin**2 / units.hPa
         r_d = (
-                287.06 * units.joule / (units.kilogram * units.kelvin)
+            287.06 * units.joule / (units.kilogram * units.kelvin)
         )  # specific gas constant of dry air
         r_v = (
-                461.525 * units.joule / (units.kilogram * units.kelvin)
+            461.525 * units.joule / (units.kilogram * units.kelvin)
         )  # specific gas constant of water vapor
         k2_ = k2 - k1 * r_d / r_v
 
         # Divides the refractivity into dry and vapour part
         # inverse compressibility factor of dry air
         z_d_inv = 1 + p_d * (
-                57.90e-8 / units.hPa
-                - (9.4581e-4 * units.kelvin / units.hPa) * t ** -1
-                + (0.25844 * units.kelvin ** 2 / units.hPa) * t ** -2
+            57.90e-8 / units.hPa
+            - (9.4581e-4 * units.kelvin / units.hPa) * t**-1
+            + (0.25844 * units.kelvin**2 / units.hPa) * t**-2
         )
         # inverse compressibility factor of water vapor
         z_v_inv = 1 + e * (1 + (3.7e-4 / units.hPa) * e) * (
-                -2.37321e-3 / units.hPa
-                + (2.23366 * units.kelvin / units.hPa) * t ** -1
-                - (710.792 * units.kelvin ** 2 / units.hPa) * t ** -2
-                + (7.75141e4 * units.kelvin ** 3 / units.hPa) * t ** -3
+            -2.37321e-3 / units.hPa
+            + (2.23366 * units.kelvin / units.hPa) * t**-1
+            - (710.792 * units.kelvin**2 / units.hPa) * t**-2
+            + (7.75141e4 * units.kelvin**3 / units.hPa) * t**-3
         )
         n_d = z_d_inv * k1 * p_d / t  # refractivity of dry air
-        n_v = z_v_inv * (k2 * e / t + k3 * e / t ** 2)  # refractivity of water vapour
+        n_v = z_v_inv * (k2 * e / t + k3 * e / t**2)  # refractivity of water vapour
 
         # Divides the refractivity into hydrostatic and a non-hydrostatic part
         rho_d = p_d / (r_d * t)  # density of dry air
@@ -352,9 +349,9 @@ class ZTDNWMGenerator:
         rho_m = rho_d + rho_v  # density of moist air
         n_h = k1 * r_d * rho_m  # hydrostatic refractivity.
         n_w = (
-                      k2_ * e / t  # non-hydrostatic refractivity (wet refractivity)
-                      + k3 * e / t ** 2
-              ) * z_v_inv
+            k2_ * e / t  # non-hydrostatic refractivity (wet refractivity)
+            + k3 * e / t**2
+        ) * z_v_inv
 
         if self.refractive_index == "mode2":
             self.ds["n"] = n_w + n_h
@@ -411,7 +408,8 @@ class ZTDNWMGenerator:
             zxd_value = intergration(y=ds[n] * 1.0e-6) * units.meters
 
             ds[f"{zxd}_simpson"] = xr.DataArray(
-                data=zxd_value, dims=["number", "time", "site_index", self.vertical_dimension]
+                data=zxd_value,
+                dims=["number", "time", "site_index", self.vertical_dimension],
             )
             ds[f"{zxd}_simpson"] = ds[f"{zxd}_simpson"] + self.top_level[zxd]
 
@@ -456,12 +454,15 @@ class ZTDNWMGenerator:
 
         # 按批切 time
         tbsz = self.batch_size
-        time_batches = [times[i:i + tbsz] for i in range(0, len(times), tbsz)]
+        time_batches = [times[i : i + tbsz] for i in range(0, len(times), tbsz)]
 
         tasks = (
             delayed(interp_one_batch)(
                 ds.sel(site_index=si),  # 传进整站数据 (含全部 time & number)
-                mem, si, t_batch, pnm
+                mem,
+                si,
+                t_batch,
+                pnm,
             )
             for si in site_indices
             for mem in numbers
@@ -469,7 +470,9 @@ class ZTDNWMGenerator:
             for t_batch in time_batches
         )
 
-        results = ParallelPbar("Vertical Interpolate to site")(n_jobs=self.n_jobs,prefer='processes')(tasks)
+        results = ParallelPbar("Vertical Interpolate to site")(
+            n_jobs=self.n_jobs, prefer="processes"
+        )(tasks)
         results = [item for sub in results for item in sub]  # flatten
 
         # ------------ 写回 Dataset -----------------------------------
@@ -493,17 +496,21 @@ class ZTDNWMGenerator:
             for mem, si, t, _, val in results:
                 data[midx[mem], sidx[si], tidx[t], 0] = val
 
-            da = xr.DataArray(
-                data=data,
-                dims=["number", "site_index", "time", "h"],
-                coords={
-                    "number": numbers,
-                    "site_index": site_indices,
-                    "time": times,
-                    # h 用原剖面最高层；这里只是形状占位，值无所谓
-                    "h": ds.h.isel({self.vertical_dimension: -1}),
-                },
-            ) * ds[pnm].metpy.units * 1000.0  # 同原代码
+            da = (
+                xr.DataArray(
+                    data=data,
+                    dims=["number", "site_index", "time", "h"],
+                    coords={
+                        "number": numbers,
+                        "site_index": site_indices,
+                        "time": times,
+                        # h 用原剖面最高层；这里只是形状占位，值无所谓
+                        "h": ds.h.isel({self.vertical_dimension: -1}),
+                    },
+                )
+                * ds[pnm].metpy.units
+                * 1000.0
+            )  # 同原代码
 
             ds_site[pnm] = da
 
@@ -551,13 +558,16 @@ class ZTDNWMGenerator:
         times = ds.time.values
 
         # time / member 双重分块
-        time_blocks = [times[i: i + TIME_CHUNK] for i in range(0, len(times), TIME_CHUNK)]
-        mem_blocks = [numbers[i: i + MEM_CHUNK] for i in range(0, len(numbers), MEM_CHUNK)]
+        time_blocks = [
+            times[i : i + TIME_CHUNK] for i in range(0, len(times), TIME_CHUNK)
+        ]
+        mem_blocks = [
+            numbers[i : i + MEM_CHUNK] for i in range(0, len(numbers), MEM_CHUNK)
+        ]
 
         tasks = (
             delayed(interp_one_batch)(
-                ds.sel(site_index=si),
-                mem_block, si, t_block, pnm
+                ds.sel(site_index=si), mem_block, si, t_block, pnm
             )
             for si in site_indices
             for mem_block in mem_blocks
@@ -567,7 +577,7 @@ class ZTDNWMGenerator:
 
         # 运行并 flatten
         results = ParallelPbar("Vertical Interpolate to site")(
-            n_jobs=self.n_jobs, prefer='processes'
+            n_jobs=self.n_jobs, prefer="processes"
         )(tasks)
         results = [item for sub in results for item in sub]
 
@@ -591,17 +601,21 @@ class ZTDNWMGenerator:
             for mem, si, t, _, val in results:
                 data[midx[mem], sidx[si], tidx[t], 0] = val
 
-            da = xr.DataArray(
-                data=data,
-                dims=["number", "site_index", "time", "h"],
-                coords={
-                    "number": numbers,
-                    "site_index": site_indices,
-                    "time": times,
-                    # h 用原剖面最高层；这里只是形状占位
-                    "h": ds.h.isel({self.vertical_dimension: -1}),
-                },
-            ) * ds[pnm].metpy.units * 1000.0  # 单位与原实现一致
+            da = (
+                xr.DataArray(
+                    data=data,
+                    dims=["number", "site_index", "time", "h"],
+                    coords={
+                        "number": numbers,
+                        "site_index": site_indices,
+                        "time": times,
+                        # h 用原剖面最高层；这里只是形状占位
+                        "h": ds.h.isel({self.vertical_dimension: -1}),
+                    },
+                )
+                * ds[pnm].metpy.units
+                * 1000.0
+            )  # 单位与原实现一致
 
             ds_site[pnm] = da
 
@@ -609,7 +623,9 @@ class ZTDNWMGenerator:
         return ds_site
 
     def run(self, time_select=None):
-        logger.info(f"Start ZTD computation (vertical_dimension={self.vertical_dimension})")
+        logger.info(
+            f"Start ZTD computation (vertical_dimension={self.vertical_dimension})"
+        )
 
         logger.info("1/11: Reading meteorological file")
         self.read_met_file()
@@ -648,4 +664,4 @@ class ZTDNWMGenerator:
         ds_site = self.vertical_interpolate_to_site()
 
         logger.info("ZTD computation finished; returning DataFrame")
-        return ds_site.to_dataframe().reset_index().drop(columns=['site_index','h'])
+        return ds_site.to_dataframe().reset_index().drop(columns=["site_index", "h"])
