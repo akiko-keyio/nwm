@@ -18,19 +18,19 @@ from tqdm_joblib import ParallelPbar
 
 class ZTDNWMGenerator:
     def __init__(
-        self,
-        nwm_path,
-        location=None,
-        egm_type="egm96-5",  # "egm96-5"
-        vertical_level="pressure_level",
-        gravity_variation="latitude",
-        refractive_index="mode2",
-        compute_e_mode="mode2",
-        p_interp_step=None,
-        swap_interp_step=None,
-        n_jobs=-3,
-        batch_size=1000,
-        load_in_memory=True,
+            self,
+            nwm_path,
+            location=None,
+            egm_type="egm96-5",#"egm96-5"
+            vertical_level="pressure_level",
+            gravity_variation="latitude",
+            refractive_index="mode2",
+            compute_e_mode="mode2",
+            p_interp_step=None,
+            swap_interp_step=None,
+            n_jobs=-3,
+            batch_size=1000,
+
     ):
         self.nwm_path = nwm_path
         self.location = location.copy()

@@ -1,24 +1,26 @@
 import time
-from nwm import ZTDNWMGenerator
 
 import pandas as pd
 import numpy as np
+from scipy.stats import zscore
+
+from nwm import ZTDNWMGenerator
 
 # ---------------- 生成器 ---------------
-location = pd.read_csv(r"data/location_gnss.csv")
-location = pd.concat([location] * 1)
+
+location = pd.read_csv(r"data/global_ngl_location.csv")
+
+nwm_path=r"data/failure/elda_pl_9_025_2023010100"
+nwm_path=r"data/failure/ERA5_20230101_00_1h.nc"
+location = pd.concat([location] )
 zg = ZTDNWMGenerator(
-    r"Z:\NWM\EDA\us_grid10\elda_pl_9_01_2023010100",
-    location=location,
-    egm_type="egm96-5",
-    n_jobs=-1,
-    load_method="auto",
+    nwm_path, location=location, egm_type="egm96-5", n_jobs=-1
+
 )
 
 # ----------- ⏱️ 计时开始 -----------
 t0 = time.perf_counter()
 df_eda = zg.run()
-
 
 dt = time.perf_counter() - t0
 print(
