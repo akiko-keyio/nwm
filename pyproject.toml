@@ -9,6 +9,7 @@ authors = [
 requires-python = "==3.10.*"
 dependencies = [
     "dask>=2025.5.1",
+    "distributed>=2025.5.1",
     "joblib>=1.5.1",
     "loguru>=0.7.3",
     "metpy>=1.7.0",
@@ -16,6 +17,7 @@ dependencies = [
     "scipy>=1.15.3",
     "tqdm-joblib>=0.0.4",
     "xarray[io]>=2025.6.1",
+    "zarr>=2.18.3",
 ]
 
 [project.scripts]
