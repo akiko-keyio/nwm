@@ -76,7 +76,6 @@ class ZTDNWMGenerator:
         batch_size: int = 100_000,
         load_method: str = "auto",
         horizental_interpolation_method: str = "linear",
-            merge_ground=False,
     ):
         self.nwm_path = Path(nwm_path)
         self.location = location.copy() if location is not None else None
@@ -91,7 +90,6 @@ class ZTDNWMGenerator:
         self.batch_size = batch_size
         self.load_method = load_method
         self.horizental_interpolation_method = horizental_interpolation_method
-        self.merge_ground=merge_ground
 
         self.ds: xr.Dataset | None = None
         self.ds_site: xr.Dataset | None = None
@@ -211,20 +209,6 @@ class ZTDNWMGenerator:
             return ds
 
         self.ds = normalize_longitude(self.ds)
-
-        def expand_p_dimension(self):
-            ds = self.ds
-            if self.merge_ground:
-                ds['p'] = ds.pressure_level.expand_dims({
-                    'lat': ds.lat,  # size 721
-                    'lon': ds.lon,  # size 1440
-                    'number': ds.number,  # size 1
-                    'time': ds.time,  # size 1
-                }).transpose('number', 'time', 'pressure_level', 'lat', 'lon')
-            else:
-                ds['p'] = ds.pressure_level
-        if "pressure_level" in self.ds.dims:
-            expand_p_dimension(self)
         logger.info(f"2/12: Format file done in {time.perf_counter() - t0:.2f}s")
 
     # ---------------------- 2  水平插值 --------------------------- #
@@ -355,9 +339,9 @@ class ZTDNWMGenerator:
             f"3/12: Horizontal interpolation done in {time.perf_counter() - t0:.2f}s"
         )
 
-
-
     # --------------------------- 3 量纲 --------------------------- #
+
+
     def quantify_met_parameters(self) -> None:
         t0 = time.perf_counter()
 
@@ -371,7 +355,7 @@ class ZTDNWMGenerator:
 
         # 2. 定义手工转换映射
         conversions = {
-            "p": ("p", lambda da: da * units.hPa),
+            "pressure_level": ("p", lambda da: da * units.hPa),
             "z": ("z", lambda da: da * units.meters ** 2 / units.second ** 2),
             "t": ("t", lambda da: da * units.kelvin),
         }
@@ -382,7 +366,7 @@ class ZTDNWMGenerator:
             for src, (dst, fn) in conversions.items()
             if src in ds and (
                     getattr(ds[src].metpy, "units", None) is None
-                    or getattr(ds[src].metpy.units, "dimensionless", True)
+                    or getattr(ds[src].metpy.units, "is_dimensionless", True)
             )
         }
         logger.info(f"Converting units: {to_convert.keys()}")
@@ -463,7 +447,7 @@ class ZTDNWMGenerator:
 
         ds, loc = self.ds, self.location
         # 目标高度网格：从最低气压层高度到最低站点高度，每 50 m 一格
-        h_max = ds.sel(pressure_level=(ds.pressure_level[ds.pressure_level>0]).min()).h.min()
+        h_max = ds.sel(pressure_level=ds.pressure_level.min()).h.min()
         target_h = np.arange(loc.alt.min(), float(h_max), 50) * units.meter
 
         # 新建输出 Dataset，保留 number、site_index、time、h 四个坐标
@@ -586,7 +570,7 @@ class ZTDNWMGenerator:
         t0 = time.perf_counter()
         ds = self.ds
         top = (
-            ds.sel(pressure_level=ds.pressure_level[ds.pressure_level>0].min())
+            ds.sel(pressure_level=ds.pressure_level.min())
             if self.vertical_dimension == "pressure_level"
             else ds.sel(h=ds.h.max())
         )
@@ -613,77 +597,11 @@ class ZTDNWMGenerator:
             if self.vertical_dimension == "pressure_level"
             else self.ds
         )
-        x = ds.transpose("number", "time", "site_index", self.vertical_dimension).h
-
-
-        import numpy as np
-
-        from scipy.integrate import cumulative_simpson
-
-        def cumulative_simpson_unsorted(y, x, axis=-1,initial=0.0):
-            """
-            在无序、非等距采样点 x 上，计算 y(x) 沿指定轴从 x_max 向 x 的累积 Simpson 积分。
-            在 x_max 处积分值为 0，之后均为正值，结果按原始点顺序返回。
-
-            参数
-            ----
-            y : array_like 或 xr.DataArray
-                待积分的多维数据。
-            x : array_like 或 xr.DataArray
-                对应坐标，shape 可与 y 完全一致或可广播到 y。
-            axis : int, optional
-                沿此轴做积分（默认最后一维）。
-
-            返回
-            -----
-            res : ndarray 或 xr.DataArray
-                与 y 相同形状、同类型的积分结果。
-            """
-            # 支持 xarray
-            is_xr = isinstance(y, xr.DataArray)
-            if is_xr:
-                orig_dims = y.dims
-                orig_coords = y.coords
-                y_arr = y.values
-                x_arr = x.values
-            else:
-                y_arr = np.asarray(y)
-                x_arr = np.asarray(x)
-
-            # 1) 升序排序索引
-            order = np.argsort(x_arr, axis=axis)  # 排序得到沿 axis 升序的位置
-
-            # 2) 排序 x 和 y
-            x_sorted = np.take_along_axis(x_arr, order, axis=axis)
-            y_sorted = np.take_along_axis(y_arr, order, axis=axis)
-
-            # 3) 计算从 x_min 到各点的累积 Simpson（初始值为 0）
-            asc_int = cumulative_simpson(y_sorted, x=x_sorted,
-                                         axis=axis, initial=initial)
-
-            # 4) 取出总积分（在 x_max 处的值），并展开回排序数组的形状以便广播
-            total = np.take(asc_int, indices=-1, axis=axis)  # 形状中去掉该轴
-            total = np.expand_dims(total, axis=axis)  # 在该轴上恢复维度
-
-            # 5) 转换成“从 x_max 向下积分”：在排序后数组上，value = total - asc_int
-            rev_int_sorted = total - asc_int
-
-            # 6) 求逆排序索引并还原到原始顺序
-            inv_order = np.argsort(order, axis=axis)
-            res_arr = np.take_along_axis(rev_int_sorted, inv_order, axis=axis)
-
-            # 7) 如果原来是 xarray，就包回 DataArray，保留 dims/coords
-            if is_xr:
-                return xr.DataArray(data=res_arr,
-                                    dims=orig_dims,
-                                    coords=orig_coords,
-                                    name=y.name)
-            else:
-                return res_arr
+        x = -ds.transpose("number", "time", "site_index", self.vertical_dimension).h
 
         def _integ(y):
             y = y.transpose("number", "time", "site_index", self.vertical_dimension)
-            return cumulative_simpson_unsorted(y=y, x=x, axis=-1, initial=0)
+            return cumulative_simpson(y=y, x=x, axis=-1, initial=0)
 
         for zxd, n in [("ztd", "n"), ("zwd", "n_w"), ("zhd", "n_h")]:
             val = _integ(ds[n] * 1.0e-6) * units.meters
@@ -701,76 +619,13 @@ class ZTDNWMGenerator:
     def vertical_interpolate_to_site(self) -> xr.Dataset:
         t0 = time.perf_counter()
         ds = self.ds
-        import numpy as np
-        from scipy.interpolate import CubicSpline
-
-        def _safe_log_cubic_interp(x: np.ndarray,
-                                  y: np.ndarray,
-                                  xnew: np.ndarray) -> np.ndarray:
-            """
-            对任意无序、含 NaN 的 (x, y) 数据做对数三次样条插值，
-            并返回 xnew 处的估计值。
-            """
-            x = np.asarray(x, dtype=float)
-            y = np.asarray(y, dtype=float)
-            # 1. 掩掉 y 或 x 中的非有限值
-            mask = np.isfinite(x) & np.isfinite(y)
-            x_filt = x[mask]
-            y_filt = y[mask]
-            if x_filt.size < 2:
-                raise ValueError(f"有效点不足：仅 {x_filt.size} 个，无法拟合")
-            # 2. 按 x 排序
-            idx = np.argsort(x_filt)
-            x_s = x_filt[idx]
-            y_s = y_filt[idx]
-            # 3. 去重，保证严格递增
-            #    对重复的 x 取 y 的均值
-            uniq_x, inv, counts = np.unique(x_s, return_inverse=True, return_counts=True)
-            if np.any(counts > 1):
-                # 平均重复 x 对应的 y
-                y_u = np.zeros_like(uniq_x)
-                for i, xx in enumerate(uniq_x):
-                    y_u[i] = y_s[inv == i].mean()
-            else:
-                y_u = y_s
-            # 4. 构造对数 CubicSpline 并插值
-            cs = CubicSpline(
-                uniq_x,
-                np.log(np.maximum(y_u, 1e-12)),
-                extrapolate=True
-            )
-            return np.exp(cs(xnew))
-
-        def log_cubic_interp(x: np.ndarray, y: np.ndarray, xnew: np.ndarray) -> np.ndarray:
-            if x[0] > x[-1]:
-                x, y = x[::-1], y[::-1]
-            mask = np.isfinite(y)
-            x_filt, y_filt = x[mask], y[mask]  # ← 修正：y_filt = y[mask]
-            if x_filt.size < 2:
-                raise ValueError(f"有效点不足：仅 {x_filt.size} 个，无法拟合")
-            cs = CubicSpline(
-                x_filt,
-                np.log(np.maximum(y_filt, 1e-12)),
-                extrapolate=True
-            )
-            return np.exp(cs(xnew))
-        # —— 修复：当 vertical_dimension=='h' 时，广播 h 到 ztd_simpson 的形状 ——
-        if self.vertical_dimension == "h":
-            h_da, ztd_da = xr.broadcast(
-                ds.h.metpy.dequantify(),
-                ds.ztd_simpson.metpy.dequantify(),
-            )
-        else:
-            h_da = ds.h.metpy.dequantify()
-            ztd_da = ds.ztd_simpson.metpy.dequantify()
-
         h_all = (
-            h_da
+            ds.h.metpy.dequantify()
             .transpose("number", "time", "site_index", self.vertical_dimension)
             .values
         )
         ztd_all = (
-            ztd_da
+            ds.ztd_simpson.metpy.dequantify()
             .transpose("number", "time", "site_index", self.vertical_dimension)
             .values
         )
@@ -779,7 +634,6 @@ class ZTDNWMGenerator:
         total_tasks = num_dim * time_dim * site_dim
 
         # ---------- 小任务：直接向量化 apply_ufunc ---------- #
-
         if total_tasks <= self.batch_size:
             logger.info("12/12: Vertical interpolation (vectorized)…")
             alt_da = (
@@ -790,25 +644,30 @@ class ZTDNWMGenerator:
                 .transpose("number", "site_index", "time")
             )
 
+            def _log_cubic(x, y, xnew):
+                if x[0] > x[-1]:
+                    x, y = x[::-1], y[::-1]
+                return np.exp(CubicSpline(x, np.log(np.maximum(y, 1e-12)))(xnew))
 
             result = xr.apply_ufunc(
-                log_cubic_interp,
+                _log_cubic,
                 ds.h.metpy.dequantify(),
                 ds.ztd_simpson.metpy.dequantify(),
                 alt_da,
-                input_core_dims=[[self.vertical_dimension],
-                                 [self.vertical_dimension], []],
+                input_core_dims=[
+                    [self.vertical_dimension],
+                    [self.vertical_dimension],
+                    [],
+                ],
                 output_core_dims=[[]],
                 vectorize=True,
                 dask="parallelized",
                 output_dtypes=[float],
             )
             da = (
-                    result
-                    .expand_dims(h=[0])
-                    .transpose("number", "site_index", "time", "h")
-                    * ds.ztd_simpson.metpy.units
-                    * 1000
+                result.expand_dims(h=[0]).transpose("number", "site_index", "time", "h")
+                * ds.ztd_simpson.metpy.units
+                * 1000
             )
             ds_site = xr.Dataset({"ztd_simpson": da})
 
@@ -818,16 +677,13 @@ class ZTDNWMGenerator:
             out = np.empty((num_dim, time_dim, site_dim), dtype=float)
 
             def _interp_one(n, t, s):
-                return _safe_log_cubic_interp(
-                    h_all[n, t, s],
-                    ztd_all[n, t, s],
-                    alt[s]
-                )
+                x = h_all[n, t, s]
+                y = ztd_all[n, t, s]
+                if x[0] > x[-1]:
+                    x, y = x[::-1], y[::-1]
+                return np.exp(CubicSpline(x, np.log(np.maximum(y, 1e-12)))(alt[s]))
 
-            flat = Parallel(
-                n_jobs=self.n_jobs,
-                batch_size=self.batch_size,
-            )(
+            flat = Parallel(n_jobs=self.n_jobs, batch_size=self.batch_size)(
                 delayed(_interp_one)(n, t, s)
                 for n in range(num_dim)
                 for t in range(time_dim)
@@ -846,12 +702,12 @@ class ZTDNWMGenerator:
             ds_site = xr.Dataset({"ztd_simpson": da})
 
         ds_site["site"] = ds.site
+        self.ds_site = ds_site
         logger.info(
             f"12/12: Vertical interpolation done in {time.perf_counter() - t0:.2f}s"
         )
         return ds_site
 
-    # ------------------------------ run --------------------------- #
     # ------------------------------ run --------------------------- #
     def run(self) -> xr.DataFrame:
         logger.info(
@@ -859,7 +715,6 @@ class ZTDNWMGenerator:
         )
         self.read_met_file()
         self.format_dataset()
-
         self.horizental_interpolate()
         self.quantify_met_parameters()
         self.geopotential_to_orthometric()
@@ -872,8 +727,4 @@ class ZTDNWMGenerator:
         self.simpson_numerical_integration()
         ds_site = self.vertical_interpolate_to_site()
         logger.info("ZTD computation finished")
-        df=ds_site.to_dataframe().reset_index()[["time","site","number","ztd_simpson"]]
-
-        if len(df.number.drop_duplicates())==1:
-            df=df.drop(columns=["number"])
-        return df
+        return ds_site.to_dataframe().reset_index().drop(columns=["site_index"])

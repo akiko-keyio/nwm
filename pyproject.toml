@@ -8,12 +8,15 @@ authors = [
 ]
 requires-python = "==3.10.*"
 dependencies = [
+    "cfgrib>=0.9.15.0",
     "dask>=2025.5.1",
     "distributed>=2025.5.1",
+    "ipywidgets>=8.1.7",
     "joblib>=1.5.1",
     "loguru>=0.7.3",
     "metpy>=1.7.0",
     "numpy>=2.2.6",
+    "pyarrow>=20.0.0",
     "scipy>=1.15.3",
     "tqdm-joblib>=0.0.4",
     "xarray[io]>=2025.6.1",
@@ -31,4 +34,5 @@ build-backend = "hatchling.build"
 dev = [
     "jupyterlab>=4.4.4",
     "notebook>=7.4.4",
+    "plotly>=6.2.0",
 ]
