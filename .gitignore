@@ -11,3 +11,6 @@ data/
 
 # Virtual environments
 .venv
+
+# outdate
+outdate/
