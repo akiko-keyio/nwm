@@ -24,7 +24,8 @@ computation follows the twelve steps originally implemented in
 References
 ----------
 `ERA5 data documentation`_
-"GNSS定位定时中的对流层延迟模型优化研究", 苏行
+"Optimization of tropospheric delay models in GNSS positioning and timing",
+Su Xing
 "Establishing a high‑precision real‑time ZTD model of China with GPS and
 ERA5 historical datas and its application in PPP"
 "Real-time precise point positioning augmented with high-resolution
