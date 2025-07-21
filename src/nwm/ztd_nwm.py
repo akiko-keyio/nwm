@@ -41,6 +41,9 @@ from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
+
+from scipy.integrate import cumulative_simpson
+import numpy as np
 import xarray as xr
 from joblib import Parallel, delayed
 from loguru import logger
@@ -72,9 +75,10 @@ class ZTDNWMGenerator:
         swap_interp_step: int | None = None,
         n_jobs: int = -1,
         batch_size: int = 100_000,
-        load_method: str = "auto",
         horizontal_interpolation_method: str = "linear",
+        resample_h: tuple=(None,None,50),
         merge_ground: bool = False,
+        interp_to_site=True
     ):
         """Initialize the generator with user settings."""
         self.nwm_path = Path(nwm_path)
@@ -88,9 +92,10 @@ class ZTDNWMGenerator:
         self.swap_interp_step = swap_interp_step
         self.n_jobs = n_jobs
         self.batch_size = batch_size
-        self.load_method = load_method
         self.horizontal_interpolation_method = horizontal_interpolation_method
+        self.resample_h = resample_h
         self.merge_ground = merge_ground
+        self.interp_to_site = interp_to_site
 
         self.ds: xr.Dataset | None = None
         self.ds_site: xr.Dataset | None = None
@@ -100,74 +105,10 @@ class ZTDNWMGenerator:
     def read_met_file(self) -> None:
         t0 = time.perf_counter()
 
-        def _load_stream() -> xr.Dataset:
-            import fsspec
+        self.ds=xr.load_dataset(self.nwm_path)
 
-            mem_url = "memory://temp.nc"
-            with (
-                self.nwm_path.open("rb") as fsrc,
-                fsspec.open(mem_url, "wb") as fdst,
-            ):
-                shutil.copyfileobj(fsrc, fdst, length=1024 << 20)
-            with fsspec.open(mem_url, "rb") as f:
-                ds = xr.open_dataset(f)
-                ds.load()
-            return ds
-
-        def _is_hdf5(path: Path, blocksize: int = 8) -> bool:
-            """Check whether file header matches the HDF5 signature."""
-
-            with path.open("rb") as f:
-                header = f.read(blocksize)
-            return header == b"\x89HDF\r\n\x1a\n"
-
-        def _load_memory() -> xr.Dataset:
-            engine = "h5netcdf" if _is_hdf5(self.nwm_path) else None
-            try:
-                ds = xr.open_dataset(
-                    self.nwm_path,
-                    engine=engine,
-                    chunks="auto",
-                    mask_and_scale=True,
-                    decode_times=True,
-                ).load()
-            except Exception as e:
-                logger.warning(
-                    f"{engine or 'default'} backend failed ({e}); retry with default engine"
-                )
-                ds = xr.open_dataset(self.nwm_path).load()
-            return ds
-
-        def _load_lazy() -> xr.Dataset:
-            return xr.open_dataset(self.nwm_path, chunks="auto")
-
-        def _load_zarr() -> xr.Dataset:
-            return xr.open_dataset(self.nwm_path, engine="zarr").load()
-
-        method = self.load_method
-        loaders = {
-            "stream": _load_stream,
-            "memory": _load_memory,
-            "lazy": _load_lazy,
-            "zarr": _load_zarr,
-        }
-
-        if method == "auto":
-            for name in ("stream", "memory", "lazy"):
-                try:
-                    self.ds = loaders[name]()
-                    logger.info(f"Loaded {name}")
-                    break
-                except Exception as e:  # pragma: no cover - log only
-                    logger.warning(f"{name} loading failed ({e})")
-            else:
-                raise RuntimeError("Failed to load dataset")
-        else:
-            if method not in loaders:
-                raise ValueError(f"Unknown load_method: {method}")
-            self.ds = loaders[method]()
         logger.info(
-            f"1/12: Reading meteorological file done in {time.perf_counter() - t0:.2f}s"
+            f"1/12: Loading NWM file done in {time.perf_counter() - t0:.2f}s"
         )
 
     def format_dataset(self):
@@ -466,10 +407,32 @@ class ZTDNWMGenerator:
         ds, loc = self.ds, self.location
         # Target height grid: from the lowest pressure level to the lowest site
         # height with a 50 m interval
-        h_max = ds.sel(
-            pressure_level=(ds.pressure_level[ds.pressure_level > 0]).min()
-        ).h.min()
-        target_h = np.arange(loc.alt.min(), float(h_max), 50) * units.meter
+        h_min_cfg, h_max_cfg, interval_cfg = self.resample_h
+
+        if h_min_cfg is None:
+            h_min=float(self.ds.alt.min())
+            logger.debug(f"h_min set to {h_min}")
+        elif isinstance(h_min_cfg,(int,float)):
+            h_min=h_min_cfg
+        else:
+            raise ValueError("resample_h_min (resample_h[0]) must be float or None")
+
+        if h_max_cfg is None:
+            h_max = float(ds.sel(
+                pressure_level=(ds.pressure_level[ds.pressure_level > 0]).min()
+            ).h.min())
+            logger.debug(f"h_max set to {h_max}")
+        elif isinstance(h_max_cfg,(int,float)):
+            h_max = h_max_cfg
+        else:
+            raise ValueError("resample_h_max (resample_h[1]) must be float or None")
+
+        if isinstance(interval_cfg, (int,float)):
+            interval=interval_cfg
+        else:
+            raise ValueError("resample_h_interval (resample_h[2]) must be int or float")
+
+        target_h = np.arange(h_min, h_max, interval) * units.meter
 
         # Create output dataset with number, site_index, time and h
         ds_new = xr.Dataset(
@@ -629,11 +592,8 @@ class ZTDNWMGenerator:
             if self.vertical_dimension == "pressure_level"
             else self.ds
         )
-        x = ds.transpose("number", "time", "site_index", self.vertical_dimension).h
+        x = -ds.transpose("number", "time", "site_index", self.vertical_dimension).h
 
-        import numpy as np
-
-        from scipy.integrate import cumulative_simpson
 
         def cumulative_simpson_unsorted(y, x, axis=-1, initial=0.0):
             """Integrate ``y(x)`` from ``x_max`` downward using Simpson's rule.
@@ -699,7 +659,7 @@ class ZTDNWMGenerator:
 
         def _integ(y):
             y = y.transpose("number", "time", "site_index", self.vertical_dimension)
-            return cumulative_simpson_unsorted(y=y, x=x, axis=-1, initial=0)
+            return cumulative_simpson(y=y, x=x, axis=-1, initial=0)
 
         for zxd, n in [("ztd", "n"), ("zwd", "n_w"), ("zhd", "n_h")]:
             val = _integ(ds[n] * 1.0e-6) * units.meters
@@ -821,7 +781,6 @@ class ZTDNWMGenerator:
             da = (
                 result.expand_dims(h=[0]).transpose("number", "site_index", "time", "h")
                 * ds.ztd_simpson.metpy.units
-                * 1000
             )
             ds_site = xr.Dataset({"ztd_simpson": da})
 
@@ -844,7 +803,7 @@ class ZTDNWMGenerator:
             )
             out[:] = np.array(flat).reshape(num_dim, time_dim, site_dim)
             da = xr.DataArray(
-                out * ds.ztd_simpson.metpy.units * 1000,
+                out * ds.ztd_simpson.metpy.units,
                 dims=("number", "time", "site_index"),
                 coords={
                     "number": ds.number,
@@ -887,4 +846,40 @@ class ZTDNWMGenerator:
 
         if len(df.number.drop_duplicates()) == 1:
             df = df.drop(columns=["number"])
+        return df
+
+    def run(self) -> xr.DataFrame:
+        logger.info(
+            f"Start ZTD computation (vertical_dimension={self.vertical_dimension})"
+        )
+        self.read_met_file()
+        self.format_dataset()
+
+        self.horizontal_interpolate()
+        self.quantify_met_parameters()
+        self.geopotential_to_orthometric()
+        self.orthometric_to_ellipsoidal()
+        self.compute_e()
+        if self.vertical_dimension != "pressure_level":
+            self.resample_to_ellipsoidal()
+        self.compute_refractive_index()
+        self.compute_top_level_delay()
+        self.simpson_numerical_integration()
+        if self.interp_to_site:
+            ds_site = self.vertical_interpolate_to_site()
+            df = ds_site.to_dataframe().reset_index()[
+                ["time", "site", "number", "ztd_simpson"]
+            ]
+        else:
+            logger.info("ZTD computation finished")
+            df= self.ds.to_dataframe().reset_index()[
+                ["time", "site","h", "number", "ztd_simpson"]
+            ]
+
+        if len(df.number.drop_duplicates()) == 1:
+            df = df.drop(columns=["number"])
+
+        df['ztd_simpson'] = df['ztd_simpson'] *1000
+
+        logger.info("ZTD computation finished")
         return df
