@@ -871,7 +871,6 @@ class ZTDNWMGenerator:
                 ["time", "site", "number", "ztd_simpson"]
             ]
         else:
-            logger.info("ZTD computation finished")
             df= self.ds.to_dataframe().reset_index()[
                 ["time", "site","h", "number", "ztd_simpson"]
             ]
