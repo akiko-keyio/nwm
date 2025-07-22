@@ -104,8 +104,10 @@ class ZTDNWMGenerator:
     # -------------------------- 1 Read file -------------------------- #
     def read_met_file(self) -> None:
         t0 = time.perf_counter()
-
-        self.ds=xr.load_dataset(self.nwm_path)
+        try:
+            self.ds=xr.load_dataset(self.nwm_path)
+        except Exception as e:
+            logger.error(f"Error Loading {self.nwm_path} For {e}")
 
         logger.info(
             f"1/12: Loading NWM file done in {time.perf_counter() - t0:.2f}s"
